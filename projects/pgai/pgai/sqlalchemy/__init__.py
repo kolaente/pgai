@@ -1,11 +1,18 @@
 from typing import Any, Generic, TypeVar
 
 from pgvector.sqlalchemy import Vector  # type: ignore
-from sqlalchemy import ForeignKey, Integer, Text
+from sqlalchemy import ForeignKey, Integer, MetaData, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, backref, mapped_column, relationship
 
 from pgai.configuration import (
+    ChunkingConfig,
+    CreateVectorizerParams,
+    DiskANNIndexingConfig,
+    HNSWIndexingConfig,
+    NoSchedulingConfig,
     OpenAIEmbeddingConfig,
+    ProcessingConfig,
+    SchedulingConfig,
 )
 
 # Type variable for the parent model
@@ -35,16 +42,48 @@ class VectorizerField:
     def __init__(
         self,
         embedding: OpenAIEmbeddingConfig,
+        chunking: ChunkingConfig,
+        formatting_template: str | None = None,
+        indexing: DiskANNIndexingConfig | HNSWIndexingConfig | None = None,
+        scheduling: SchedulingConfig | NoSchedulingConfig | None = None,
+        processing: ProcessingConfig | None = None,
         target_schema: str | None = None,
         target_table: str | None = None,
+        view_schema: str | None = None,
+        view_name: str | None = None,
+        queue_schema: str | None = None,
+        queue_table: str | None = None,
+        grant_to: list[str] | None = None,
+        enqueue_existing: bool = True,
         add_relationship: bool = False,
     ):
         self.add_relationship = add_relationship
+
         self.embedding_config = embedding
+
+        self.chunking_config = chunking
+
+        if formatting_template is None:
+            self.formatting_template = "$chunk"
+        else:
+            self.formatting_template = formatting_template
+
+        # Handle optional configs
+        self.indexing_config = indexing
+
+        self.scheduling_config = scheduling
+
+        self.processing_config = processing
 
         # Store table/view configuration
         self.target_schema = target_schema
         self.target_table = target_table
+        self.view_schema = view_schema
+        self.view_name = view_name
+        self.queue_schema = queue_schema or "ai"
+        self.queue_table = queue_table
+        self.grant_to = grant_to
+        self.enqueue_existing = enqueue_existing
         self.owner: type[DeclarativeBase] | None = None
         self.name: str | None = None
 
@@ -56,6 +95,7 @@ class VectorizerField:
             or owner.registry.metadata.schema
             or "public"
         )
+        self.view_schema = self.view_schema or self.target_schema
 
     def create_embedding_class(
         self, owner: type[T], name: str
@@ -98,6 +138,8 @@ class VectorizerField:
         self.owner = owner
         self.name = name
         self._embedding_class = self.create_embedding_class(owner, name)
+        if self.view_name is None:
+            self.view_name = self.view_name or f"{owner.__tablename__}_{name}"
 
         # Set up relationship
         if self.add_relationship:
@@ -107,3 +149,35 @@ class VectorizerField:
                 backref=backref("parent", lazy="select"),
             )
             setattr(owner, f"{name}_relation", relationship_instance)
+
+        # Register vectorizer configuration
+
+        metadata = owner.registry.metadata
+        self._register_with_metadata(metadata)
+
+    def _register_with_metadata(self, metadata: MetaData) -> None:
+        """Register vectorizer configuration for migration generation"""
+        if not hasattr(metadata, "info"):
+            metadata.info = {}
+        assert self.owner is not None
+
+        vectorizers = metadata.info.setdefault("vectorizers", {})
+        vectorizer_params = CreateVectorizerParams(
+            source_table=self.owner.__tablename__,
+            embedding=self.embedding_config,
+            chunking=self.chunking_config,
+            indexing=self.indexing_config,
+            formatting_template=self.formatting_template,
+            scheduling=self.scheduling_config,
+            processing=self.processing_config,
+            target_schema=self.target_schema,
+            target_table=self._embedding_class.__tablename__,
+            view_schema=self.view_schema,
+            view_name=self.view_name,
+            queue_schema=self.queue_schema,
+            queue_table=self.queue_table,
+            grant_to=self.grant_to,
+            enqueue_existing=self.enqueue_existing,
+        )
+
+        vectorizers[f"{self.owner.__tablename__}.{self.name}"] = vectorizer_params

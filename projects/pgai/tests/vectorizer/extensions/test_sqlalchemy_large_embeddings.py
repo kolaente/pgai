@@ -7,6 +7,7 @@ from testcontainers.postgres import PostgresContainer  # type: ignore
 
 from pgai.cli import vectorizer_worker
 from pgai.configuration import (
+    ChunkingConfig,
     OpenAIEmbeddingConfig,
 )
 from pgai.sqlalchemy import VectorizerField
@@ -26,6 +27,7 @@ class BlogPost(Base):
             model="text-embedding-3-large",
             dimensions=1536,
         ),
+        chunking=ChunkingConfig(chunk_column="content"),
     )
 
 
